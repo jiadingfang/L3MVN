@@ -6,6 +6,8 @@ import skimage.morphology
 from PIL import Image
 from torchvision import transforms
 import time
+import matplotlib.pyplot as plt
+import quaternion
 
 from envs.utils.fmm_planner import FMMPlanner
 from envs.habitat.objectgoal_env import ObjectGoal_Env
@@ -149,18 +151,19 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             goal = planner_inputs['goal']
             map_target = planner_inputs["map_target"]
 
-            # if np.sum(goal == 1) == 1 and self.args.task_config == "tasks/objectnav_gibson.yaml":
-            #     frontier_loc = np.where(goal == 1)
-            #     self.info["g_reward"] = self.get_llm_distance(planner_inputs["map_target"], frontier_loc)
+            if np.sum(goal == 1) == 1 and self.args.task_config == "tasks/objectnav_gibson.yaml":
+                frontier_loc = np.where(goal == 1)
+                self.info["g_reward"] = self.get_llm_distance(planner_inputs["map_target"], frontier_loc)
             
             # if np.sum(goal == 1) == 1 and len(list(set(map_target.ravel()))) >= (4 + 1): # 0 is background, 1,2,3,4 are frontiers 
             #     frontier_loc = np.where(goal == 1)
             #     self.info["g_reward"] = self.get_llm_distance(planner_inputs, frontier_loc)
 
-            if np.sum(goal == 1) == 1 and len(list(set(map_target.ravel()))) >= (4 + 1): # 0 is background, 1,2,3,4 are frontiers
-                frontier_loc = np.where(goal == 1)
-                llm_sp_frontier_compatible = self.check_llm_shortest_frontier_compatible(planner_inputs, frontier_loc)
-            # self.collision_map = np.zeros(self.visited.shape)
+            # if np.sum(goal == 1) == 1 and len(list(set(map_target.ravel()))) >= (4 + 1): # 0 is background, 1,2,3,4 are frontiers
+            #     frontier_loc = np.where(goal == 1)
+            #     llm_sp_frontier_compatible = self.check_llm_shortest_frontier_compatible(planner_inputs, frontier_loc)
+
+            self.collision_map = np.zeros(self.visited.shape)
             self.info['clear_flag'] = 0
 
         action = self._plan(planner_inputs)
@@ -464,6 +467,37 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             self.rgb_vis = rgb[:, :, ::-1]
         return red_semantic_pred, semantic_pred
 
+    def round_view_of_frontier(self, frontier_pos, frontier_rot, n=16, name=None):
+        def display_obs(obs, name=""):
+            img = obs["rgb"]
+            depth = obs["depth"]
+            semantic = obs["semantic"]
+
+            arr = [img, depth, semantic]
+            titles = ["rgb", "depth", "semantic"]
+            plt.figure(figsize=(12, 8))
+            for i, data in enumerate(arr):
+                ax = plt.subplot(1, 3, i + 1)
+                ax.axis("off")
+                ax.set_title(titles[i])
+                plt.imshow(data)
+
+            # plt.show()
+            plt.savefig("test_viz/goal_viz_{}.png".format(name))
+            plt.close()
+
+        for i in range(n):
+            d_rot_rad = i / n * np.pi * 2
+            d_rot_quat = quaternion.from_rotation_vector([0, d_rot_rad, 0])
+            rot_quat = d_rot_quat * frontier_rot
+            # print('frontier_pos: ', frontier_pos)
+            # print('rot_quat: ', rot_quat)
+            frontier_obs = self._env.sim.get_observations_at(frontier_pos, rot_quat)
+            if name is None:
+                display_obs(frontier_obs, "pos_{}_{}".format(frontier_pos, i))
+            else:
+                display_obs(frontier_obs, "{}_{}".format(name, i))
+
     def _visualize(self, inputs):
         args = self.args
         dump_dir = "{}/good_0.1/{}/".format(args.dump_location,
@@ -555,13 +589,39 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
 
         if args.print_images:
             map_pose = pos
-            agent_position = self._env.sim.get_agent_state(0).position
+            agent_state = self._env.sim.get_agent_state(0)
+            agent_position = agent_state.position
+            agent_rot = agent_state.rotation
             print('full pose (start_x, start_y, start_o): ', start_x, start_y, start_o)
             print('origins (gx1, gy1): ', gx1, gy1)
+            print('local map boundary: [gx1, gx2, gy1, gy2]: ', gx1, gx2, gy1, gy2)
             print('map pose: ', map_pose)
+            x, y, _ = map_pose
+            cont_x = (x + gy1) / 20. 
+            cont_y = (480 - y + gx1) / 20. 
+            calc_x = -0.455 * cont_x - 0.891 * cont_y + 39.487
+            calc_y = -0.891 * cont_x + 0.455 * cont_y + 15.362
+            # print('calculated agent position: ', calc_x, calc_y)
             print('agent postion: ', agent_position)
             fn = '{}/episodes/thread_{}/eps_{}/{}-{}-Vis-{}-map_pose-{}-sim_pose-{}.png'.format(
                 dump_dir, self.rank, self.episode_no,
                 self.rank, self.episode_no, self.timestep, map_pose, agent_position)
             cv2.imwrite(fn, self.vis_image)
+
+            agent_position[0] = calc_x
+            agent_position[2] = calc_y
+            print('calc agent position: ', agent_position)
+            self.round_view_of_frontier(agent_position, agent_rot, n=16, name='timestep_{}_calc_agent_view_{}'.format(self.timestep, agent_position))
+
+            if np.sum(goal) == 1:
+                print('f_pos: ', f_pos)
+                x, y = f_pos[0]
+                cont_x = (x + gy1) / 20. 
+                cont_y = (480 - y + gx1) / 20. 
+                calc_x = -0.455 * cont_x - 0.891 * cont_y + 39.487
+                calc_y = -0.891 * cont_x + 0.455 * cont_y + 15.362
+                agent_position[0] = calc_x
+                agent_position[2] = calc_y
+                print('goal position: ', agent_position)
+                self.round_view_of_frontier(agent_position, agent_rot, n=16, name='timestep_{}_goal_position_view_{}'.format(self.timestep, agent_position))
 

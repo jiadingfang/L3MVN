@@ -272,7 +272,7 @@ class ObjectGoal_Env21(habitat.RLEnv):
         origin = [lmb[2] * self.args.map_resolution / 100.0, lmb[0] * self.args.map_resolution / 100.0, 0.]
         
         # self.map_origin = [-711.378, -481.322] # calculate according to [240, 240] translate to [7.18678, _, 4.88622]
-        self.map_origin = [-2888.622, -3118.678] # calculate according to [240, 240] translate to [7.18678, _, 4.88622]
+        # self.map_origin = [-2888.622, -3118.678] # calculate according to [240, 240] translate to [7.18678, _, 4.88622]
 
         # print('target_point_map shape: ', target_point_map.shape) # (480, 480)
         # print('pose_pred: ', pose_pred) # [ 24.  24.   0. 240. 720. 240. 720.]
@@ -314,16 +314,14 @@ class ObjectGoal_Env21(habitat.RLEnv):
             # use planner inputs to get origin from lmb to convert local_map coords to global_map coords and then convert to sim coords
             agent_state = self._env.sim.get_agent_state(0)
             agent_position = agent_state.position
-            y, x = coords
-            min_x, min_y = self.map_origin[0] / 100.0, self.map_origin[1] / 100.0
-
-            cont_x = (480 - x) / 20. + origin[1] + min_x
-            # cont_x = x / 20. + origin[0] + min_x
-            cont_y = y / 20. + origin[0] + min_y
+            # min_x, min_y = self.map_origin[0] / 100.0, self.map_origin[1] / 100.0
+            x, y = coords
+            cont_x = x / 20. + origin[0]
+            cont_y = (480 - y) / 20. + origin[1]
             # agent_position[0] = cont_y
             # agent_position[2] = cont_x
-            agent_position[0] = -cont_y
-            agent_position[2] = -cont_x
+            agent_position[0] = -0.455 * cont_x - 0.891 * cont_y + 39.487
+            agent_position[2] = -0.891 * cont_x + 0.455 * cont_y + 15.362
 
             return agent_position
         
@@ -370,7 +368,7 @@ class ObjectGoal_Env21(habitat.RLEnv):
             # print('agent_state.rotation: ', agent_state.rotation)
 
             # round_view_of_frontier(agent_state.position, agent_state.rotation)
-            round_view_of_frontier(start_point, agent_state.rotation, n=16, name="frontier_loc_{}".format(frontier_loc))
+            # round_view_of_frontier(start_point, agent_state.rotation, n=16, name="frontier_loc_{}".format(frontier_loc))
 
             # frontier_obs = self._env.sim.get_observations_at(start_point, agent_state.rotation)
             # display_obs(frontier_obs)
