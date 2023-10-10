@@ -144,12 +144,22 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             return np.zeros(self.obs.shape), self.fail_case, False, self.info
 
         # Reset reward if new long-term goal
+        llm_sp_frontier_compatible = -1
         if planner_inputs["new_goal"]:
             goal = planner_inputs['goal']
-            if np.sum(goal == 1) == 1 and self.args.task_config == "tasks/objectnav_gibson.yaml":
-                frontier_loc = np.where(goal == 1)
-                self.info["g_reward"] = self.get_llm_distance(planner_inputs["map_target"], frontier_loc)
+            map_target = planner_inputs["map_target"]
 
+            # if np.sum(goal == 1) == 1 and self.args.task_config == "tasks/objectnav_gibson.yaml":
+            #     frontier_loc = np.where(goal == 1)
+            #     self.info["g_reward"] = self.get_llm_distance(planner_inputs["map_target"], frontier_loc)
+            
+            # if np.sum(goal == 1) == 1 and len(list(set(map_target.ravel()))) >= (4 + 1): # 0 is background, 1,2,3,4 are frontiers 
+            #     frontier_loc = np.where(goal == 1)
+            #     self.info["g_reward"] = self.get_llm_distance(planner_inputs, frontier_loc)
+
+            if np.sum(goal == 1) == 1 and len(list(set(map_target.ravel()))) >= (4 + 1): # 0 is background, 1,2,3,4 are frontiers
+                frontier_loc = np.where(goal == 1)
+                llm_sp_frontier_compatible = self.check_llm_shortest_frontier_compatible(planner_inputs, frontier_loc)
             # self.collision_map = np.zeros(self.visited.shape)
             self.info['clear_flag'] = 0
 
@@ -171,6 +181,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             # act
             action = {'action': action}
             obs, rew, done, info = super().step(action)
+            # print('super obs shape: ', obs.shape) # [5, 480, 640]
 
             if done and self.info['success'] == 0:
                 if self.info['time'] >= self.args.max_episode_length - 1:
@@ -184,12 +195,13 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
                 self.fail_case['success'] += 1
 
             # preprocess obs
-            obs = self._preprocess_obs(obs) 
+            obs = self._preprocess_obs(obs)
+            # print('obs shape after preprocess: ', obs.shape) # [20, 120, 160]
             self.last_action = action['action']
             self.obs = obs
             self.info = info
             info['eve_angle'] = self.eve_angle
-
+            info['llm_sp_frontier_compatible'] = llm_sp_frontier_compatible
 
             # e_time = time.time()
             # ss_time = e_time - c_time
@@ -229,8 +241,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
         goal = planner_inputs['goal']
 
         # Get pose prediction and global policy planning window
-        start_x, start_y, start_o, gx1, gx2, gy1, gy2 = \
-            planner_inputs['pose_pred']
+        start_x, start_y, start_o, gx1, gx2, gy1, gy2 = planner_inputs['pose_pred']
         gx1, gx2, gy1, gy2 = int(gx1), int(gx2), int(gy1), int(gy2)
         planning_window = [gx1, gx2, gy1, gy2]
 
@@ -295,7 +306,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
 
         if replan:
             self.replan_count += 1
-            print("false: ", self.replan_count)
+            print("replan_count: ", self.replan_count)
         else:
             self.replan_count = 0
 
@@ -455,7 +466,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
 
     def _visualize(self, inputs):
         args = self.args
-        dump_dir = "{}/dump/{}/".format(args.dump_location,
+        dump_dir = "{}/good_0.1/{}/".format(args.dump_location,
                                         args.exp_name)
         ep_dir = '{}/episodes/thread_{}/eps_{}/'.format(
             dump_dir, self.rank, self.episode_no)
@@ -500,9 +511,8 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
         sem_map[goal_mask] = 4
         if np.sum(goal) == 1:
             f_pos = np.argwhere(goal == 1)
-            # fmb = get_frontier_boundaries((f_pos[0][0], f_pos[0][1]))
-            # goal_fmb = skimage.draw.circle_perimeter(int((fmb[0]+fmb[1])/2), int((fmb[2]+fmb[3])/2), 23)
-            goal_fmb = skimage.draw.circle_perimeter(f_pos[0][0], f_pos[0][1], local_w/4-2)
+
+            goal_fmb = skimage.draw.circle_perimeter(f_pos[0][0], f_pos[0][1], int(local_w/4-2))
             goal_fmb[0][goal_fmb[0] > local_w-1] = local_w-1
             goal_fmb[1][goal_fmb[1] > local_w-1] = local_w-1
             goal_fmb[0][goal_fmb[0] < 0] = 0
@@ -527,10 +537,8 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
         self.vis_image[50:530, 670:1150] = sem_map_vis
 
         pos = (
-            (start_x * 100. / args.map_resolution - gy1)
-            * 480 / map_pred.shape[0],
-            (map_pred.shape[1] - start_y * 100. / args.map_resolution + gx1)
-            * 480 / map_pred.shape[1],
+            (start_x * 100. / args.map_resolution - gy1) * 480 / map_pred.shape[0],
+            (map_pred.shape[1] - start_y * 100. / args.map_resolution + gx1) * 480 / map_pred.shape[1],
             np.deg2rad(-start_o)
         )
 
@@ -546,9 +554,14 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             cv2.waitKey(1)
 
         if args.print_images:
-            fn = '{}/episodes/thread_{}/eps_{}/{}-{}-Vis-{}.png'.format(
+            map_pose = pos
+            agent_position = self._env.sim.get_agent_state(0).position
+            print('full pose (start_x, start_y, start_o): ', start_x, start_y, start_o)
+            print('origins (gx1, gy1): ', gx1, gy1)
+            print('map pose: ', map_pose)
+            print('agent postion: ', agent_position)
+            fn = '{}/episodes/thread_{}/eps_{}/{}-{}-Vis-{}-map_pose-{}-sim_pose-{}.png'.format(
                 dump_dir, self.rank, self.episode_no,
-                self.rank, self.episode_no, self.timestep)
+                self.rank, self.episode_no, self.timestep, map_pose, agent_position)
             cv2.imwrite(fn, self.vis_image)
-
 

@@ -1,16 +1,25 @@
+import os
 import json
 import bz2
 import gzip
 import _pickle as cPickle
 import gym
+import cv2
 import numpy as np
 import quaternion
 import skimage.morphology
 import habitat
+from PIL import Image
+import copy
 
 from envs.utils.fmm_planner import FMMPlanner
 from constants import category_to_id, mp3d_category_id
 import envs.utils.pose as pu
+from constants import color_palette
+import agents.utils.visualization as vu
+
+
+import matplotlib.pyplot as plt
 
 coco_categories = [0, 3, 2, 4, 5, 1]
 
@@ -77,6 +86,7 @@ class ObjectGoal_Env21(habitat.RLEnv):
         for i in items:
             if len(i) > 3:
                 self.hm3d_semantic_mapping[i[2]] = i[-1]
+        # hm3d_semantic_mapping is a map between actual object name to category name
 
         # print()
 
@@ -160,6 +170,7 @@ class ObjectGoal_Env21(habitat.RLEnv):
         self.info['sensor_pose'] = [0., 0., 0.]
         self.info['goal_cat_id'] = coco_categories[obs['objectgoal'][0]]
         self.info['goal_name'] = category_to_id[obs['objectgoal'][0]]
+        self.info['agent_state'] = self._env.sim.get_agent_state(0)
 
         self.goal_name = category_to_id[obs['objectgoal'][0]]
 
@@ -205,8 +216,14 @@ class ObjectGoal_Env21(habitat.RLEnv):
         semantic = self._preprocess_semantic(obs["semantic"])
         state = np.concatenate((rgb, depth, semantic), axis=2).transpose(2, 0, 1)
 
+        # print('rgb shape: ', rgb.shape) # [480, 640, 3]
+        # print('depth shape: ', depth.shape) # [480, 640, 1]
+        # print('semantic shape: ', semantic.shape) # [480, 640, 1]
+        # print('state shape: ', state.shape) # [5, 480, 640]
+
         self.timestep += 1
         self.info['time'] = self.timestep
+        self.info['agent_state'] = self._env.sim.get_agent_state(0)
 
         return state, rew, done, self.info
 
@@ -246,16 +263,157 @@ class ObjectGoal_Env21(habitat.RLEnv):
         self.prev_distance = self.curr_distance
         return reward
 
-    def get_llm_distance(self, target_point_map, frontier_loc_g):
+    def check_llm_shortest_frontier_compatible(self, planner_inputs, frontier_loc_g):
 
-        frontier_dis_g = self.gt_planner.fmm_dist[frontier_loc_g[0],
-                                                frontier_loc_g[1]] / 20.0
+        target_point_map = planner_inputs['map_target']
+        pose_pred = planner_inputs['pose_pred']
+        full_pose = pose_pred[:3]
+        lmb = pose_pred[3:]
+        origin = [lmb[2] * self.args.map_resolution / 100.0, lmb[0] * self.args.map_resolution / 100.0, 0.]
+        
+        # self.map_origin = [-711.378, -481.322] # calculate according to [240, 240] translate to [7.18678, _, 4.88622]
+        self.map_origin = [-2888.622, -3118.678] # calculate according to [240, 240] translate to [7.18678, _, 4.88622]
+
+        # print('target_point_map shape: ', target_point_map.shape) # (480, 480)
+        # print('pose_pred: ', pose_pred) # [ 24.  24.   0. 240. 720. 240. 720.]
+        # print('full_pose: ', full_pose) # [24. 24.  0.]
+        # print('lmb: ', lmb) # [240. 720. 240. 720.]
+        # print('origin: ', origin) # [12.0, 12.0, 0.0]
+
+        current_episode = self._env.current_episode
+
+        episode_view_points = [
+            view_point.agent_state.position
+            for goal in current_episode.goals
+            for view_point in goal.view_points
+        ]
+
+        # print("===================================================")
+        # print('self.args: ', self.args)
+        # print('self._env.__dir__(): ', self._env.__dir__())
+        # print('self._env.sim.__dir__(): ', self._env.sim.__dir__())
+        # print('self._env.sim.agents: ', self._env.sim.agents)
+        # print('self._env.current_episode.__dir__(): ', self._env.current_episode.__dir__())
+        # # print('len(self._env.current_episode.goals): ', len(self._env.current_episode.goals))
+        # print('self._env.current_episode.goals[0].position: ', self._env.current_episode.goals[0].position)
+        # print('self._env.current_episode.goals[0].object_name: ', self._env.current_episode.goals[0].object_name)
+        # print('self._env.current_episode.goals[1].position: ', self._env.current_episode.goals[1].position)
+        # print('self._env.current_episode.goals[1].object_name: ', self._env.current_episode.goals[1].object_name)
+        # print('self._env.current_episode.goals[0].__dir__: ', self._env.current_episode.goals[0].__dir__())
+        print('self._env.sim.get_agent_state().position: ', self._env.sim.get_agent_state().position)
+        # # print('episode_view_points: ', episode_view_points)
+        # # print('[goal.position for goal in self._env.current_episode.goals]: ', [goal.position for goal in self._env.current_episode.goals])
+        # print('self._env.sim.geodesic_distances: ', self._env.sim.geodesic_distance(self._env.sim.get_agent_state().position, episode_view_points, self._env.current_episode))
+        print('self._env.get_metrics(): ', self._env.get_metrics())
+        # print("===================================================")
+
+        def sim_map_to_sim_continuous(origin, coords):
+            """Converts ground-truth 2D Map coordinates to absolute Habitat
+            simulator position.
+            """
+            # use planner inputs to get origin from lmb to convert local_map coords to global_map coords and then convert to sim coords
+            agent_state = self._env.sim.get_agent_state(0)
+            agent_position = agent_state.position
+            y, x = coords
+            min_x, min_y = self.map_origin[0] / 100.0, self.map_origin[1] / 100.0
+
+            cont_x = (480 - x) / 20. + origin[1] + min_x
+            # cont_x = x / 20. + origin[0] + min_x
+            cont_y = y / 20. + origin[0] + min_y
+            # agent_position[0] = cont_y
+            # agent_position[2] = cont_x
+            agent_position[0] = -cont_y
+            agent_position[2] = -cont_x
+
+            return agent_position
+        
+        def search_valid_points_from_agent_to_frontier(frontier_loc):
+
+            def display_obs(obs, name=""):
+                img = obs["rgb"]
+                depth = obs["depth"]
+                semantic = obs["semantic"]
+
+                arr = [img, depth, semantic]
+                titles = ["rgb", "depth", "semantic"]
+                plt.figure(figsize=(12, 8))
+                for i, data in enumerate(arr):
+                    ax = plt.subplot(1, 3, i + 1)
+                    ax.axis("off")
+                    ax.set_title(titles[i])
+                    plt.imshow(data)
+
+                # plt.show()
+                plt.savefig("test_viz/frontier_viz_{}.png".format(name))
+                plt.close()
+
+            def round_view_of_frontier(frontier_pos, frontier_rot, n=16, name=None):
+                for i in range(n):
+                    d_rot_rad = i / n * np.pi * 2
+                    d_rot_quat = quaternion.from_rotation_vector([0, d_rot_rad, 0])
+                    rot_quat = d_rot_quat * frontier_rot
+                    # print('frontier_pos: ', frontier_pos)
+                    # print('rot_quat: ', rot_quat)
+                    frontier_obs = self._env.sim.get_observations_at(frontier_pos, rot_quat)
+                    if name is None:
+                        display_obs(frontier_obs, "pos_{}_{}".format(frontier_pos, i))
+                    else:
+                        display_obs(frontier_obs, "{}_{}".format(name, i))
+
+            # from habitat.utils.visualizations import maps
+            agent_state = self._env.sim.get_agent_state(0)
+
+            start_point = sim_map_to_sim_continuous(origin, frontier_loc)
+            # add observation at this position to verify the validity of the point
+            # print('frontier_loc: ', frontier_loc)
+            # print('start_point: ', start_point)
+            # print('agent_state.rotation: ', agent_state.rotation)
+
+            # round_view_of_frontier(agent_state.position, agent_state.rotation)
+            round_view_of_frontier(start_point, agent_state.rotation, n=16, name="frontier_loc_{}".format(frontier_loc))
+
+            # frontier_obs = self._env.sim.get_observations_at(start_point, agent_state.rotation)
+            # display_obs(frontier_obs)
+            # print(frontier_obs['rgb'].shape) # (480, 640, 3)
+            # print(frontier_obs['depth'].shape) # (480, 640, 1)
+            # print(frontier_obs['semantic'].shape) # (480, 640, 1)
+
+            end_point = self._env.sim.get_agent_state(0).position
+            sample_points = np.linspace(start_point, end_point, num=100)
+            print('start_point: ', start_point)
+            # print('end_point: ', end_point)
+            # print('sample_points: ', sample_points)
+            for sample_point in sample_points:
+                is_valid = self._env.sim.pathfinder.is_navigable(sample_point)
+                if is_valid:
+                    print('valid sample_point: ', sample_point)
+                    return sample_point
+            print('no valid sample_point')
+            return self._env.sim.pathfinder.snap_point(start_point)
+
+        def get_frontier_dis(frontier_loc):
+            closest_valid_point = search_valid_points_from_agent_to_frontier(frontier_loc)
+            frontier_dis = self._env.sim.geodesic_distance(closest_valid_point, episode_view_points, current_episode)
+            return frontier_dis
+        
+        # frontier_dis_g = self.gt_planner.fmm_dist[frontier_loc_g[0], frontier_loc_g[1]] / 20.0
+        print('frontier_loc_g: ', frontier_loc_g)
+        frontier_dis_g = get_frontier_dis(frontier_loc_g)
+        print('frontier_dis_g: ', frontier_dis_g)
+
         tpm = len(list(set(target_point_map.ravel()))) -1
+        print('tpm: ', tpm)
         for lay in range(tpm):
-            frontier_loc = np.argwhere(target_point_map == lay+1)
-            frontier_distance = self.gt_planner.fmm_dist[frontier_loc[0],
-                                                      frontier_loc[1]] / 20.0
-            if frontier_distance > frontier_dis_g:
+            # frontier_loc = np.argwhere(target_point_map == lay+1)
+            frontier_loc = np.where(target_point_map == lay+1)
+            # frontier_distance = self.gt_planner.fmm_dist[frontier_loc[0], frontier_loc[1]] / 20.0
+            print("===================================================")
+            print('frontier_loc: ', frontier_loc)
+            frontier_distance = get_frontier_dis(frontier_loc)
+            self.visualize_frontier(planner_inputs, frontier_loc, name="frontier_loc_{}".format(frontier_loc))
+            print('frontier_distance: ', frontier_distance)
+            print("===================================================")
+            if frontier_distance < frontier_dis_g:
                 return 0
         return 1
         
@@ -320,3 +478,120 @@ class ObjectGoal_Env21(habitat.RLEnv):
             curr_sim_pose, self.last_sim_location)
         self.last_sim_location = curr_sim_pose
         return dx, dy, do
+
+
+    def visualize_frontier(self, inputs, frontier_loc, name=None):
+
+        frontier_vis = vu.init_vis_image(self.goal_name, None)
+
+        args = self.args
+        dump_dir = "{}/dump/{}/".format(args.dump_location,
+                                        args.exp_name)
+        ep_dir = '{}/episodes/thread_{}/eps_{}/'.format(
+            dump_dir, self.rank, self.episode_no)
+        if not os.path.exists(ep_dir):
+            os.makedirs(ep_dir)
+
+        local_w = inputs['map_pred'].shape[0]
+
+        map_pred = inputs['map_pred']
+        exp_pred = inputs['exp_pred']
+        map_edge = inputs['map_edge']
+        start_x, start_y, start_o, gx1, gx2, gy1, gy2 = inputs['pose_pred']
+
+        goal = inputs['goal']
+        sem_map = copy.deepcopy(inputs['sem_map_pred'])
+
+        gx1, gx2, gy1, gy2 = int(gx1), int(gx2), int(gy1), int(gy2)
+
+        sem_map += 5
+
+        no_cat_mask = sem_map == 20
+        map_mask = np.rint(map_pred) == 1
+        exp_mask = np.rint(exp_pred) == 1
+        vis_mask = self.visited_vis[gx1:gx2, gy1:gy2] == 1
+        edge_mask = map_edge == 1
+
+        sem_map[no_cat_mask] = 0
+        m1 = np.logical_and(no_cat_mask, exp_mask)
+        sem_map[m1] = 2
+
+        m2 = np.logical_and(no_cat_mask, map_mask)
+        sem_map[m2] = 1
+
+        sem_map[vis_mask] = 3
+        sem_map[edge_mask] = 3
+
+        # draw circle around the frontier loc
+        frontier_mask = np.zeros_like(edge_mask)
+        frontier_mask[frontier_loc[0], frontier_loc[1]] = 1
+
+        frontier_fmb = skimage.draw.circle_perimeter(int(frontier_loc[0]), int(frontier_loc[1]), int(local_w/32))
+        frontier_fmb[0][frontier_fmb[0] > local_w-1] = local_w-1
+        frontier_fmb[1][frontier_fmb[1] > local_w-1] = local_w-1
+        frontier_fmb[0][frontier_fmb[0] < 0] = 0
+        frontier_fmb[1][frontier_fmb[1] < 0] = 0
+        frontier_mask[frontier_fmb[0], frontier_fmb[1]] = 1
+        sem_map[frontier_mask] = 3
+
+        # draw circle around the goal loc
+        selem = skimage.morphology.disk(4)
+        goal_mat = 1 - skimage.morphology.binary_dilation(
+            goal, selem) != True
+
+        goal_mask = goal_mat == 1
+        sem_map[goal_mask] = 4
+        if np.sum(goal) == 1:
+            f_pos = np.argwhere(goal == 1)
+
+            goal_fmb = skimage.draw.circle_perimeter(f_pos[0][0], f_pos[0][1], int(local_w/4-2))
+            goal_fmb[0][goal_fmb[0] > local_w-1] = local_w-1
+            goal_fmb[1][goal_fmb[1] > local_w-1] = local_w-1
+            goal_fmb[0][goal_fmb[0] < 0] = 0
+            goal_fmb[1][goal_fmb[1] < 0] = 0
+            # goal_fmb[goal_fmb < 0] =0
+            goal_mask[goal_fmb[0], goal_fmb[1]] = 1
+            sem_map[goal_mask] = 4
+
+
+        color_pal = [int(x * 255.) for x in color_palette]
+        sem_map_vis = Image.new("P", (sem_map.shape[1],
+                                      sem_map.shape[0]))
+        sem_map_vis.putpalette(color_pal)
+        sem_map_vis.putdata(sem_map.flatten().astype(np.uint8))
+        sem_map_vis = sem_map_vis.convert("RGB")
+        sem_map_vis = np.flipud(sem_map_vis)
+
+        sem_map_vis = sem_map_vis[:, :, [2, 1, 0]]
+        sem_map_vis = cv2.resize(sem_map_vis, (480, 480),
+                                 interpolation=cv2.INTER_NEAREST)
+        frontier_vis[50:530, 15:655] = self.rgb_vis
+        frontier_vis[50:530, 670:1150] = sem_map_vis
+
+        pos = (
+            (start_x * 100. / args.map_resolution - gy1) * 480 / map_pred.shape[0],
+            (map_pred.shape[1] - start_y * 100. / args.map_resolution + gx1) * 480 / map_pred.shape[1],
+            np.deg2rad(-start_o)
+        )
+
+        agent_arrow = vu.get_contour_points(pos, origin=(670, 50), size=10)
+        color = (int(color_palette[11] * 255),
+                 int(color_palette[10] * 255),
+                 int(color_palette[9] * 255))
+        cv2.drawContours(frontier_vis, [agent_arrow], 0, color, -1)
+
+        if args.visualize:
+            # Displaying the image
+            cv2.imshow("Thread {}".format(self.rank), frontier_vis)
+            cv2.waitKey(1)
+
+        if args.print_images:
+            if name is None:
+                fn = '{}/episodes/thread_{}/eps_{}/frontier-{}-{}-Vis-{}.png'.format(
+                    dump_dir, self.rank, self.episode_no,
+                    self.rank, self.episode_no, self.timestep)
+            else:
+                fn = '{}/episodes/thread_{}/eps_{}/frontier-{}-{}-Vis-{}-{}.png'.format(
+                    dump_dir, self.rank, self.episode_no,
+                    self.rank, self.episode_no, self.timestep, name)
+            cv2.imwrite(fn, frontier_vis)

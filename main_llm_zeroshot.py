@@ -4,7 +4,7 @@ import os
 import logging
 import time
 import json
-import gym
+# import gym
 import torch.nn as nn
 import torch
 import torch.optim as optim
@@ -35,7 +35,7 @@ from model import Semantic_Mapping, FeedforwardNet
 from envs.utils.fmm_planner import FMMPlanner
 from envs import make_vec_envs
 from arguments import get_args
-import algo
+# import algo
 
 from constants import category_to_id, hm3d_category, category_to_id_gibson
 
@@ -179,10 +179,16 @@ def main():
     # 4-7 store local map boundaries
     planner_pose_inputs = np.zeros((num_scenes, 7))
 
+    # # full map pose info
+    # full_map_pose_info = np.zeros((num_scenes, 6))
+
     frontier_score_list = []
     for _ in range(args.num_processes):
         frontier_score_list.append(deque(maxlen=10))
 
+    frontier_object_list = []
+    for _ in range(args.num_processes):
+        frontier_object_list.append(deque(maxlen=10))
     
     # object_norm_inv_perplexity = torch.tensor(np.load('data/object_norm_inv_perplexity.npy')).to(device)
 
@@ -228,33 +234,37 @@ def main():
         return [int(gx1), int(gx2), int(gy1), int(gy2)]
 
     def init_map_and_pose():
-        full_map.fill_(0.)
-        full_pose.fill_(0.)
-        full_pose[:, :2] = args.map_size_cm / 100.0 / 2.0
+        full_map.fill_(0.) # shape: [1, 20, 960, 960]
+        full_pose.fill_(0.) 
+        full_pose[:, :2] = args.map_size_cm / 100.0 / 2.0 # [24, 24, 0]
 
         locs = full_pose.cpu().numpy()
         planner_pose_inputs[:, :3] = locs
+        # full_map_pose_info[:, :3] = full_pose
         for e in range(num_scenes):
             r, c = locs[e, 1], locs[e, 0]
             loc_r, loc_c = [int(r * 100.0 / args.map_resolution),
-                            int(c * 100.0 / args.map_resolution)]
+                            int(c * 100.0 / args.map_resolution)] # [480, 480]
 
             full_map[e, 2:4, loc_r - 1:loc_r + 2, loc_c - 1:loc_c + 2] = 1.0
 
             lmb[e] = get_local_map_boundaries((loc_r, loc_c),
                                               (local_w, local_h),
                                               (full_w, full_h))
-
+            # local_w = 480, local_h = 480
+            # full_w = 960, full_h = 960
+            # lmb value: [240, 720, 240, 720]
             planner_pose_inputs[e, 3:] = lmb[e]
             origins[e] = [lmb[e][2] * args.map_resolution / 100.0,
-                          lmb[e][0] * args.map_resolution / 100.0, 0.]
+                          lmb[e][0] * args.map_resolution / 100.0, 0.] # [12, 12, 0]
+            # full_map_pose_info[e, 3:] = origins[e]
 
         for e in range(num_scenes):
             local_map[e] = full_map[e, :,
                                     lmb[e, 0]:lmb[e, 1],
-                                    lmb[e, 2]:lmb[e, 3]]
+                                    lmb[e, 2]:lmb[e, 3]] # shape: [1, 20, 480, 480]
             local_pose[e] = full_pose[e] - \
-                torch.from_numpy(origins[e]).to(device).float()
+                torch.from_numpy(origins[e]).to(device).float() # [12, 12, 0]
 
     def init_map_and_pose_for_env(e):
         full_map[e].fill_(0.)
@@ -277,6 +287,7 @@ def main():
 
         locs = full_pose[e].cpu().numpy()
         planner_pose_inputs[e, :3] = locs
+        # full_map_pose_info[e, :3] = full_pose[e]
         r, c = locs[1], locs[0]
         loc_r, loc_c = [int(r * 100.0 / args.map_resolution),
                         int(c * 100.0 / args.map_resolution)]
@@ -290,13 +301,14 @@ def main():
         planner_pose_inputs[e, 3:] = lmb[e]
         origins[e] = [lmb[e][2] * args.map_resolution / 100.0,
                       lmb[e][0] * args.map_resolution / 100.0, 0.]
+        # full_map_pose_info[e, 3:] = origins[e]
 
         local_map[e] = full_map[e, :, lmb[e, 0]:lmb[e, 1], lmb[e, 2]:lmb[e, 3]]
         local_pose[e] = full_pose[e] - \
             torch.from_numpy(origins[e]).to(device).float()
 
+    # import pdb; pdb.set_trace()
     init_map_and_pose()
-
 
     def remove_small_points(local_ob_map, image, threshold_point, pose):
         # print("goal_cat_id: ", goal_cat_id)
@@ -342,9 +354,9 @@ def main():
             for i, (key, value) in enumerate(dict_cost):
                 # print(i, key)
                 Goal_edge[img_label == key + 1] = 1
-                Goal_point[int(props[key].centroid[0]), int(props[key].centroid[1])] = i+1 #
+                Goal_point[int(props[key].centroid[0]), int(props[key].centroid[1])] = i+1 # goal point is a sparse version of goal_edge ? because it uses centroid
                 Goal_score.append(value)
-                if i == 3:
+                if i == 3: # only 4 frontier considered
                     break
 
         return Goal_edge, Goal_point, Goal_score
@@ -507,19 +519,19 @@ def main():
     # Predict semantic map from frame 1
     poses = torch.from_numpy(np.asarray(
         [infos[env_idx]['sensor_pose'] for env_idx in range(num_scenes)])
-    ).float().to(device)
+    ).float().to(device) # [[0, 0, 0]]
 
     eve_angle = np.asarray(
         [infos[env_idx]['eve_angle'] for env_idx
-            in range(num_scenes)])
+            in range(num_scenes)]) # [0]
     
-
+    # import pdb; pdb.set_trace()
     increase_local_map, local_map, local_map_stair, local_pose = \
         sem_map_module(obs, poses, local_map, local_pose, eve_angle)
 
     local_map[:, 0, :, :][local_map[:, 13, :, :] > 0] = 0
 
-
+    # random actions as global goals
     actions = torch.randn(num_scenes, 2)*6
     # print("actions: ", actions.shape)
     cpu_actions = nn.Sigmoid()(actions).cpu().numpy()
@@ -537,22 +549,26 @@ def main():
     for e, p_input in enumerate(planner_inputs):
         p_input['map_pred'] = local_map[e, 0, :, :].cpu().numpy()
         p_input['exp_pred'] = local_map[e, 1, :, :].cpu().numpy()
-        p_input['pose_pred'] = planner_pose_inputs[e]
+        p_input['pose_pred'] = planner_pose_inputs[e] # shape: [1, 7], first 3 dims are full_pose, the last 4 are local map boundaries 
+        # p_input['pose_full'] = full_map_pose_info # first 3 dims are fu
         p_input['goal'] = goal_maps[e]  # global_goals[e]
         p_input['map_target'] = target_point_map[e]  # global_goals[e]
         p_input['new_goal'] = 1
-        p_input['found_goal'] = 0
+        # p_input['found_goal'] = 0
         p_input['wait'] = wait_env[e] or finished[e]
         if args.visualize or args.print_images:
             p_input['map_edge'] = target_edge_map[e]
             local_map[e, -1, :, :] = 1e-5
             p_input['sem_map_pred'] = local_map[e, 4:, :, :
                                                 ].argmax(0).cpu().numpy()
-
+    # import pdb; pdb.set_trace()
     obs, _, done, infos = envs.plan_act_and_preprocess(planner_inputs)
 
     start = time.time()
     g_reward = 0
+
+    llm_sp_compatible_lst = []
+    frontier_selection_mode_list = [0, 0, 0]
 
     torch.set_grad_enabled(False)
     spl_per_category = defaultdict(list)
@@ -600,10 +616,22 @@ def main():
             [infos[env_idx]['eve_angle'] for env_idx
              in range(num_scenes)])
         
+        # import pdb; pdb.set_trace()
 
         increase_local_map, local_map, local_map_stair, local_pose = \
             sem_map_module(obs, poses, local_map, local_pose, eve_angle)
+        # input:
+        # obs: shape: [1, 20, 120, 160]
+        # poses: [0.0, -0.0, 0.0], shape: [1,3]
+        # local_map: shape: [1, 20, 480, 480]
+        # local_pose: [12.0, 12.0, 0.0], shape: [1,3]
+        # eve_angle: [-30]
 
+        # output:
+        # increase_local_map: [1, 20, 480, 480]
+        # local_map: [1, 20, 480, 480]
+        # local_map_stair: [1, 20, 480, 480]
+        # local_pose: [12.0, 12.0, 0.0]
 
         locs = local_pose.cpu().numpy()
         planner_pose_inputs[:, :3] = locs + origins
@@ -644,11 +672,13 @@ def main():
                 if wait_env[e] == 1:  # New episode
                     wait_env[e] = 0.
 
-                
-                full_map[e, :, lmb[e, 0]:lmb[e, 1], lmb[e, 2]:lmb[e, 3]] = \
-                    local_map[e]
-                full_pose[e] = local_pose[e] + \
-                    torch.from_numpy(origins[e]).to(device).float()
+                full_map[e, :, lmb[e, 0]:lmb[e, 1], lmb[e, 2]:lmb[e, 3]] = local_map[e]
+                full_pose[e] = local_pose[e] + torch.from_numpy(origins[e]).to(device).float()
+
+                # print('lmb: ', lmb)
+                # print('local_pose: ', local_pose)
+                # print('origins: ', origins)
+                # print('full_pose: ', full_pose)
 
                 locs = full_pose[e].cpu().numpy()
                 r, c = locs[1], locs[0]
@@ -711,14 +741,16 @@ def main():
                 target_edge[target_edge!=1.0]=0.0
 
                 local_pose_map = [local_pose[e][1]*100/args.map_resolution, local_pose[e][0]*100/args.map_resolution]
-                target_edge_map[e], target_point_map[e], Goal_score = remove_small_points(_local_ob_map, target_edge, 4, local_pose_map) 
+                target_edge_map[e], target_point_map[e], Goal_score = remove_small_points(_local_ob_map, target_edge, 4, local_pose_map)
+                # target_edge_map[0].shape:  (480, 480)
+                # target_point_map[0].shape:  (480, 480)
+                # Goal_score: [88.0, 32.0, 29.0, 25.0]
+                # _local_ob_map.shape:  (480, 480)
+                # target_edge.shape:  (480, 480)
+                # local_pose_map:  [240.7, 240.5]
   
-
-
-                local_ob_map[e]=np.zeros((local_w,
-                        local_h))
-                local_ex_map[e]=np.zeros((local_w,
-                        local_h))
+                local_ob_map[e]=np.zeros((local_w, local_h))
+                local_ex_map[e]=np.zeros((local_w, local_h))
 
                 # ------------------------------------------------------------------
 
@@ -728,7 +760,13 @@ def main():
                 cn = infos[e]['goal_cat_id'] + 4
                 cname = infos[e]['goal_name'] 
                 frontier_score_list[e] = []
+                frontier_object_list[e] = []
                 tpm = len(list(set(target_point_map[e].ravel()))) -1
+                
+                print('number of frontier points: ', tpm)
+                unique_target_point_map = list(set(target_point_map[e].ravel()))
+                for value in unique_target_point_map:
+                    print('target_point_map value {} has {} number of points '.format(value, np.argwhere(target_point_map[e] == value).shape[0]))
                 
                 for lay in range(tpm):
                     f_pos = np.argwhere(target_point_map[e] == lay+1)
@@ -740,7 +778,9 @@ def main():
                         if local_map[e][se_cn+4, fmb[0]:fmb[1], fmb[2]:fmb[3]].sum() != 0.:
                             objs_list.append(hm3d_category[se_cn])
 
-                    if len(objs_list)>0 and found_goal[e] == 0:
+                    frontier_object_list[e].append(objs_list)
+
+                    if len(objs_list)>0 and found_goal[e] == 0: # if the frontier map boundary contains some objects in the object categories
                         ref_dist = F.softmax(construct_dist(objs_list),
                                             dim=0).to(device)
                         new_dist = ref_dist
@@ -751,9 +791,13 @@ def main():
 
                         # ref = torch.argmax(new_dist)
                         # frontier_score_list[e].append(new_dist) 
-                        frontier_score_list[e].append(new_dist[category_to_id.index(cname)]) 
+                        frontier_score = new_dist[category_to_id.index(cname)]
+                        frontier_score_list[e].append(frontier_score)
+                        print('frontier objects {} has llm score {}'.format(objs_list, frontier_score))
                     else:
-                        frontier_score_list[e].append(Goal_score[lay]/max(Goal_score) * 0.1 + 0.1) 
+                        frontier_score = Goal_score[lay]/max(Goal_score) * 0.1 + 0.1
+                        frontier_score_list[e].append(frontier_score)
+                        print('score by goal score: ', frontier_score)
 
 
             # ------------------------------------------------------------------
@@ -782,8 +826,9 @@ def main():
         found_goal = [0 for _ in range(num_scenes)]
     
         local_goal_maps = [np.zeros((local_w, local_h)) for _ in range(num_scenes)]
-        
-
+        # print('local_goal_maps: ', local_goal_maps[0].shape) # [480, 480]
+        # print('local_w: ', local_w) # 480
+        # print('local_h: ', local_h) # 480
 
         for e in range(num_scenes):
 
@@ -792,17 +837,29 @@ def main():
             # ------------------------------------------------------------------
             global_item = 0
             if len(frontier_score_list[e]) > 0:
-                if max(frontier_score_list[e]) > 0.3:
+                print('frontier_score_list: ', frontier_score_list[e])
+                if max(frontier_score_list[e]) > 0.3: # if there is a very good frontier (>0.3), global_item is the index of it
                     global_item = frontier_score_list[e].index(max(frontier_score_list[e]))
+                    print('frontier {} score greater than 0.3 with objects {}'.format(global_item, frontier_object_list[e][global_item]))
+                    frontier_selection_mode_list[0] += 1
                 
-                elif max(frontier_score_list[e]) > 0.1:
+                elif max(frontier_score_list[e]) > 0.1: # if there are some good frontier (>0.1) but not very good frontier, global_item is the index of the first one
                     for f_score in frontier_score_list[e]:
                         if f_score > 0.1:
+                            print('the best frontier score is between 0.1 and 0.3, choose frontier {} with objects {}'.format(global_item, frontier_object_list[e][global_item]))
+                            frontier_selection_mode_list[1] += 1
                             break
                         else:
                             global_item += 1
-                else:
+
+                # if max(frontier_score_list[e]) > 0.1: # if there is a good frontier (>0.1), global_item is the index of it
+                #     global_item = frontier_score_list[e].index(max(frontier_score_list[e]))
+                #     print('frontier {} score greater than 0.1 with objects {}'.format(global_item, frontier_object_list[e][global_item]))
+                #     frontier_selection_mode_list[0] += 1
+                else: # if there are no good frontier, global_item is 0
                     global_item = 0
+                    print('frontier score less than 0.1, index ', global_item)
+                    frontier_selection_mode_list[2] += 1
                 #------------------------------------------------------------------
 
                 ###### Get llm frontier reward
@@ -817,16 +874,15 @@ def main():
 
             if np.any(target_point_map[e] == global_item+1):
                 local_goal_maps[e][target_point_map[e] == global_item+1] = 1
-                # print("Find the edge")
+                print("Find the frontier edge")    
                 g_sum_global += 1
             else:
                 local_goal_maps[e][global_goals[e][0], global_goals[e][1]] = 1
-
-                # print("Don't Find the edge")
+                print("Cannot find the edge, use random-generated global_goals")
 
             cn = infos[e]['goal_cat_id'] + 4
             if local_map[e, cn, :, :].sum() != 0.:
-                # print("Find the target")
+                print("Find the target")
                 cat_semantic_map = local_map[e, cn, :, :].cpu().numpy()
                 cat_semantic_scores = cat_semantic_map
                 cat_semantic_scores[cat_semantic_scores > 0] = 1.
@@ -835,6 +891,8 @@ def main():
                 local_goal_maps[e] = find_big_connect(cat_semantic_scores)
                 found_goal[e] = 1
 
+        print('goal location: ', np.where(local_goal_maps[e]==1))
+        print('l_step: ', l_step)
         # ------------------------------------------------------------------
 
         # ------------------------------------------------------------------
@@ -845,19 +903,19 @@ def main():
             p_input['map_pred'] = local_map[e, 0, :, :].cpu().numpy()
             p_input['exp_pred'] = local_map[e, 1, :, :].cpu().numpy()
             p_input['pose_pred'] = planner_pose_inputs[e]
-            p_input['goal'] = local_goal_maps[e]  # global_goals[e]
-            p_input['map_target'] = target_point_map[e]  # global_goals[e]
-            p_input['new_goal'] = l_step == args.num_local_steps - 1
+            p_input['goal'] = local_goal_maps[e]  # global_goals[e] # local_goal_map is chosen frontier point
+            p_input['map_target'] = target_point_map[e]  # global_goals[e] # target_point_map is the map for all frontier points with order
+            p_input['new_goal'] = l_step == args.num_local_steps - 1 # args.num_local_steps=10
             p_input['found_goal'] = found_goal[e]
             p_input['wait'] = wait_env[e] or finished[e]
             if args.visualize or args.print_images:
                 p_input['map_edge'] = target_edge_map[e]
                 local_map[e, -1, :, :] = 1e-5
-                p_input['sem_map_pred'] = local_map[e, 4:, :,
-                                                :].argmax(0).cpu().numpy()
+                p_input['sem_map_pred'] = local_map[e, 4:, :, :].argmax(0).cpu().numpy()
    
-
+        import pdb; pdb.set_trace()
         obs, fail_case, done, infos = envs.plan_act_and_preprocess(planner_inputs)
+        llm_sp_compatible_lst.append(infos[0]['llm_sp_frontier_compatible'])
         # ------------------------------------------------------------------
 
         # ------------------------------------------------------------------
@@ -866,7 +924,14 @@ def main():
 
         # ------------------------------------------------------------------
 
-        if step % args.log_interval == 0:
+        if step % args.log_interval == 0: # args.log_interval=10
+            # import pdb; pdb.set_trace()
+            llm_sp_frontier_compatible_numpy = np.array(llm_sp_compatible_lst)
+            llm_sp_frontier_compatible_rate = np.sum(llm_sp_frontier_compatible_numpy >= 1) / np.sum(llm_sp_frontier_compatible_numpy >= 0)
+            # print('llm_sp_compatible_lst: ', llm_sp_compatible_lst)
+            print('llm_sp_frontier_compatible_rate: ', llm_sp_frontier_compatible_rate)
+            print('frontier_selection_mode_list: ', frontier_selection_mode_list)
+
             end = time.time()
             time_elapsed = time.gmtime(end - start)
             log = " ".join([
@@ -876,8 +941,8 @@ def main():
                 "FPS {},".format(int(step * num_scenes / (end - start)))
             ])
 
-            log += "\n\tLLM Rewards: " + str(g_process_rewards /g_sum_rewards)
-            log += "\n\tLLM use rate: " + str(g_sum_rewards /g_sum_global)
+            # log += "\n\tLLM Rewards: " + str(g_process_rewards /g_sum_rewards)
+            # log += "\n\tLLM use rate: " + str(g_sum_rewards /g_sum_global)
 
             if args.eval:
                 total_success = []
