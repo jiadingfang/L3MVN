@@ -467,7 +467,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             self.rgb_vis = rgb[:, :, ::-1]
         return red_semantic_pred, semantic_pred
 
-    def round_view_of_frontier(self, frontier_pos, frontier_rot, n=16, name=None):
+    def round_view_of_frontier(self, frontier_pos, frontier_rot, n=16, save=True, name=None):
         def display_obs(obs, name=""):
             img = obs["rgb"]
             depth = obs["depth"]
@@ -486,6 +486,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             plt.savefig("test_viz/goal_viz_{}.png".format(name))
             plt.close()
 
+        list_sim_obs = []
         for i in range(n):
             d_rot_rad = i / n * np.pi * 2
             d_rot_quat = quaternion.from_rotation_vector([0, d_rot_rad, 0])
@@ -493,10 +494,31 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             # print('frontier_pos: ', frontier_pos)
             # print('rot_quat: ', rot_quat)
             frontier_obs = self._env.sim.get_observations_at(frontier_pos, rot_quat)
-            if name is None:
-                display_obs(frontier_obs, "pos_{}_{}".format(frontier_pos, i))
-            else:
-                display_obs(frontier_obs, "{}_{}".format(name, i))
+            list_sim_obs.append(frontier_obs)
+            if save:
+                if name is None:
+                    display_obs(frontier_obs, "pos_{}_{}".format(frontier_pos, i))
+                else:
+                    display_obs(frontier_obs, "{}_{}".format(name, i))
+        return list_sim_obs
+    
+    def map_coords_to_sim_coords(self, origin, coords):
+        """Converts ground-truth 2D Map coordinates to absolute Habitat
+        simulator position.
+        """
+        # use planner inputs to get origin from lmb to convert local_map coords to global_map coords and then convert to sim coords
+        agent_state = self._env.sim.get_agent_state(0)
+        agent_position = agent_state.position
+        # min_x, min_y = self.map_origin[0] / 100.0, self.map_origin[1] / 100.0
+        x, y = coords
+        cont_x = x / 20. + origin[0] / 20.
+        cont_y = (480 - y) / 20. + origin[1] / 20.
+        # agent_position[0] = cont_y
+        # agent_position[2] = cont_x
+        agent_position[0] = -0.455 * cont_x - 0.891 * cont_y + 39.487
+        agent_position[2] = -0.891 * cont_x + 0.455 * cont_y + 15.362
+
+        return agent_position
 
     def _visualize(self, inputs):
         args = self.args
@@ -538,8 +560,7 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
         sem_map[edge_mask] = 3
 
         selem = skimage.morphology.disk(4)
-        goal_mat = 1 - skimage.morphology.binary_dilation(
-            goal, selem) != True
+        goal_mat = 1 - skimage.morphology.binary_dilation(goal, selem) != True
 
         goal_mask = goal_mat == 1
         sem_map[goal_mask] = 4
@@ -557,16 +578,15 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
 
 
         color_pal = [int(x * 255.) for x in color_palette]
-        sem_map_vis = Image.new("P", (sem_map.shape[1],
-                                      sem_map.shape[0]))
+        sem_map_vis = Image.new("P", (sem_map.shape[1], sem_map.shape[0]))
         sem_map_vis.putpalette(color_pal)
         sem_map_vis.putdata(sem_map.flatten().astype(np.uint8))
         sem_map_vis = sem_map_vis.convert("RGB")
         sem_map_vis = np.flipud(sem_map_vis)
 
         sem_map_vis = sem_map_vis[:, :, [2, 1, 0]]
-        sem_map_vis = cv2.resize(sem_map_vis, (480, 480),
-                                 interpolation=cv2.INTER_NEAREST)
+        sem_map_vis = cv2.resize(sem_map_vis, (480, 480), interpolation=cv2.INTER_NEAREST)
+
         self.vis_image[50:530, 15:655] = self.rgb_vis
         self.vis_image[50:530, 670:1150] = sem_map_vis
 
@@ -592,36 +612,92 @@ class Sem_Exp_Env_Agent(ObjectGoal_Env21):
             agent_state = self._env.sim.get_agent_state(0)
             agent_position = agent_state.position
             agent_rot = agent_state.rotation
-            print('full pose (start_x, start_y, start_o): ', start_x, start_y, start_o)
-            print('origins (gx1, gy1): ', gx1, gy1)
-            print('local map boundary: [gx1, gx2, gy1, gy2]: ', gx1, gx2, gy1, gy2)
-            print('map pose: ', map_pose)
-            x, y, _ = map_pose
-            cont_x = (x + gy1) / 20. 
-            cont_y = (480 - y + gx1) / 20. 
-            calc_x = -0.455 * cont_x - 0.891 * cont_y + 39.487
-            calc_y = -0.891 * cont_x + 0.455 * cont_y + 15.362
-            # print('calculated agent position: ', calc_x, calc_y)
-            print('agent postion: ', agent_position)
+            
             fn = '{}/episodes/thread_{}/eps_{}/{}-{}-Vis-{}-map_pose-{}-sim_pose-{}.png'.format(
                 dump_dir, self.rank, self.episode_no,
                 self.rank, self.episode_no, self.timestep, map_pose, agent_position)
             cv2.imwrite(fn, self.vis_image)
 
-            agent_position[0] = calc_x
-            agent_position[2] = calc_y
-            print('calc agent position: ', agent_position)
-            self.round_view_of_frontier(agent_position, agent_rot, n=16, name='timestep_{}_calc_agent_view_{}'.format(self.timestep, agent_position))
+            print('full pose (start_x, start_y, start_o): ', start_x, start_y, start_o)
+            print('origins (gx1, gy1): ', gx1, gy1)
+            print('local map boundary: [gx1, gx2, gy1, gy2]: ', gx1, gx2, gy1, gy2)
+            print('map pose: ', map_pose)
+            print('agent postion: ', agent_position)
+            agent_x, agent_y, _ = map_pose
+            agent_map_coords = [agent_x, agent_y]
+            agent_origin = [gy1, gx1]
+
+            # agent_cont_x = (agent_x + gy1) / 20. 
+            # agent_cont_y = (480 - agent_y + gx1) / 20. 
+            # agent_calc_x = -0.455 * agent_cont_x - 0.891 * agent_cont_y + 39.487
+            # agent_calc_y = -0.891 * agent_cont_x + 0.455 * agent_cont_y + 15.362
+            # # print('calculated agent position: ', calc_x, calc_y)
+            # agent_position[0] = agent_calc_x
+            # agent_position[2] = agent_calc_y
+            
+            calc_agent_position = self.map_coords_to_sim_coords(agent_origin, agent_map_coords)
+            print('calc agent position: ', calc_agent_position)
+            self.round_view_of_frontier(calc_agent_position, agent_rot, n=8, name='timestep_{}_calc_agent_view_{}'.format(self.timestep, agent_position))
+
+            # # test print
+            # for i in range(11):
+            #     for j in range(11):
+            #         agent_position[0] = i - 5
+            #         agent_position[2] = j - 5
+            #         self.round_view_of_frontier(agent_position, agent_rot, n=1, name='test_agent_view_{}'.format(agent_position))
 
             if np.sum(goal) == 1:
                 print('f_pos: ', f_pos)
-                x, y = f_pos[0]
-                cont_x = (x + gy1) / 20. 
-                cont_y = (480 - y + gx1) / 20. 
-                calc_x = -0.455 * cont_x - 0.891 * cont_y + 39.487
-                calc_y = -0.891 * cont_x + 0.455 * cont_y + 15.362
-                agent_position[0] = calc_x
-                agent_position[2] = calc_y
-                print('goal position: ', agent_position)
-                self.round_view_of_frontier(agent_position, agent_rot, n=16, name='timestep_{}_goal_position_view_{}'.format(self.timestep, agent_position))
+                goal_x, goal_y = f_pos[0]
+                goal_map_coords = [goal_x, goal_y]
+                goal_origin = [gy1, gx1]
 
+                # goal_cont_x = (goal_x + gy1) / 20. 
+                # goal_cont_y = (480 - goal_y + gx1) / 20. 
+                # goal_calc_x = -0.455 * goal_cont_x - 0.891 * goal_cont_y + 39.487
+                # goal_calc_y = -0.891 * goal_cont_x + 0.455 * goal_cont_y + 15.362
+                # agent_position[0] = goal_calc_x
+                # agent_position[2] = goal_calc_y
+                
+                calc_goal_position = self.map_coords_to_sim_coords(origin=goal_origin, coords=goal_map_coords)
+                print('goal position: ', calc_goal_position)
+                self.round_view_of_frontier(calc_goal_position, agent_rot, n=8, name='timestep_{}_goal_position_view_{}'.format(self.timestep, agent_position))
+
+                # test print
+                n_points = 5
+                for i in range(n_points+1):
+                    mid_x = agent_x + (goal_x - agent_x) / n_points * i
+                    mid_y = agent_y + (goal_y - agent_y) / n_points * i
+                    mid_map_coords = [mid_x, mid_y]
+                    mid_origin = [gy1, gx1]
+                    calc_mid_position = self.map_coords_to_sim_coords(origin=mid_origin, coords=mid_map_coords)
+                    obs = self.round_view_of_frontier(calc_mid_position, agent_rot, n=1, save=False)
+                    obs_rgb = obs[0]["rgb"]
+
+                    # print('sem_map shape: ', sem_map.shape) # (480, 480)
+                    mid_fmb = skimage.draw.circle_perimeter(int(mid_x), int(mid_y), 3)
+                    mid_fmb[0][mid_fmb[0] > local_w-1] = local_w-1
+                    mid_fmb[1][mid_fmb[1] > local_w-1] = local_w-1
+                    mid_fmb[0][mid_fmb[0] < 0] = 0
+                    mid_fmb[1][mid_fmb[1] < 0] = 0
+                    # goal_fmb[goal_fmb < 0] =0
+                    edge_mask[mid_fmb[0], mid_fmb[1]] = 1
+                    sem_map[edge_mask] = 3
+                    color_pal = [int(x * 255.) for x in color_palette]
+                    test_sem_map_vis = Image.new("P", (sem_map.shape[1], sem_map.shape[0]))
+                    test_sem_map_vis.putpalette(color_pal)
+                    test_sem_map_vis.putdata(sem_map.flatten().astype(np.uint8))
+                    test_sem_map_vis = test_sem_map_vis.convert("RGB")
+                    test_sem_map_vis = np.flipud(test_sem_map_vis)
+                    test_sem_map_vis = test_sem_map_vis[:, :, [2, 1, 0]]
+                    test_sem_map_vis = cv2.resize(test_sem_map_vis, (480, 480), interpolation=cv2.INTER_NEAREST)
+
+                    test_image = vu.init_vis_image(self.goal_name, self.legend)
+                    test_image[50:530, 15:655] = cv2.cvtColor(obs_rgb, cv2.COLOR_RGB2BGR)
+                    test_image[50:530, 670:1150] = test_sem_map_vis
+
+                    cv2.drawContours(test_image, [agent_arrow], 0, color, -1)
+                    fn = '{}/episodes/thread_{}/eps_{}/{}-{}-Vis-{}-mid_pose-{}-sim_pose-{}-idx-{}.png'.format(
+                        dump_dir, self.rank, self.episode_no,
+                        self.rank, self.episode_no, self.timestep, map_pose, agent_position, i)
+                    cv2.imwrite(fn, test_image)

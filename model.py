@@ -43,7 +43,7 @@ class Semantic_Mapping(nn.Module):
 
         self.pool = ChannelPool(1)
 
-        vr = self.vision_range
+        vr = self.vision_range # 100
 
         self.init_grid = torch.zeros(
             args.num_processes, 1 + self.num_sem_categories, vr, vr,
@@ -64,14 +64,12 @@ class Semantic_Mapping(nn.Module):
         bs, c, h, w = obs.size()
         depth = obs[:, 3, :, :]   
 
-        point_cloud_t = du.get_point_cloud_from_z_t(
-            depth, self.camera_matrix, self.device, scale=self.du_scale)
+        point_cloud_t = du.get_point_cloud_from_z_t(depth, self.camera_matrix, self.device, scale=self.du_scale)
 
-        agent_view_t = du.transform_camera_view_t(
-            point_cloud_t, self.agent_height, eve_angle, self.device)
+        agent_view_t = du.transform_camera_view_t(point_cloud_t, self.agent_height, eve_angle, self.device) # takes care of camera elevation
 
-        agent_view_centered_t = du.transform_pose_t(
-            agent_view_t, self.shift_loc, self.device)
+        agent_view_centered_t = du.transform_pose_t(agent_view_t, self.shift_loc, self.device)
+        # print('self.shift_loc: ', self.shift_loc) # [250, 0, 1.5707963267948966]
 
         max_h = self.max_height
         min_h = self.min_height

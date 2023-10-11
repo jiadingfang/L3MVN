@@ -913,7 +913,7 @@ def main():
                 local_map[e, -1, :, :] = 1e-5
                 p_input['sem_map_pred'] = local_map[e, 4:, :, :].argmax(0).cpu().numpy()
    
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         obs, fail_case, done, infos = envs.plan_act_and_preprocess(planner_inputs)
         llm_sp_compatible_lst.append(infos[0]['llm_sp_frontier_compatible'])
         # ------------------------------------------------------------------
